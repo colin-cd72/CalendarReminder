@@ -10,9 +10,10 @@ from calendar_reminder.calendars import (
     list_user_calendars,
     pick_calendars_dialog,
     pick_calendars_interactive,
+    preview_sweep_dialog,
 )
 from calendar_reminder.config import load_config, save_config
-from calendar_reminder.sweeper import sweep
+from calendar_reminder.sweeper import collect_silence_candidates, patch_events, sweep
 
 
 def _setup_logging(log_dir, verbose):
@@ -62,6 +63,9 @@ def main(argv=None):
                         help="Run calendar picker, save selection, and exit (no sweep).")
     parser.add_argument("--cli-picker", action="store_true",
                         help="Use the terminal picker instead of the GUI dialog.")
+    parser.add_argument("--preview", action="store_true",
+                        help="Show a preview dialog listing events about to be silenced; "
+                             "user confirms which to patch.")
     args = parser.parse_args(argv)
 
     project_root = Path(__file__).parent
@@ -109,6 +113,22 @@ def main(argv=None):
         print(f"Saved {len(selected)} calendar(s) to {args.config}")
         if args.select_calendars:
             return 0
+
+    if args.preview and not args.dry_run:
+        candidates = collect_silence_candidates(service, cfg, days_override=args.days)
+        if not candidates:
+            print("No events match silence rules. Nothing to do.")
+            return 0
+        confirmed = preview_sweep_dialog(candidates)
+        if confirmed is None:
+            print("Cancelled by user. No changes made.")
+            return 0
+        if not confirmed:
+            print("No events checked. Nothing to silence.")
+            return 0
+        result = patch_events(service, confirmed)
+        print(f"Silenced {result['silenced']} event(s); errors={result['errors']}")
+        return 0 if result["errors"] == 0 else 1
 
     counts = sweep(service, cfg, dry_run=args.dry_run, days_override=args.days)
     return 0 if counts["errors"] == 0 else 1

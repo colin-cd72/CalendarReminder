@@ -57,6 +57,52 @@ def _patch_silence(service, calendar_id, event_id):
             raise
 
 
+def collect_silence_candidates(service, config, days_override=None):
+    """Fetch and classify events. Return a list of actionable silence candidates
+    (already-silenced events are excluded).
+
+    Each candidate is a dict: {id, summary, cal_id, rule}.
+    """
+    days = days_override if days_override is not None else config["scan"]["days_ahead"]
+    calendar_ids = config["scan"].get("calendars") or ["primary"]
+    now = _now_utc()
+    time_min = now.isoformat()
+    time_max = (now + dt.timedelta(days=days)).isoformat()
+
+    events = []
+    for cal_id in calendar_ids:
+        events.extend(_list_events(service, cal_id, time_min, time_max))
+
+    candidates = []
+    for ev in events:
+        action, rule = classify(ev, config)
+        if action == "silence" and not _already_silenced(ev):
+            candidates.append({
+                "id": ev.get("id", "?"),
+                "summary": ev.get("summary", ""),
+                "cal_id": ev.get("_calendarId", "primary"),
+                "rule": rule,
+            })
+    return candidates
+
+
+def patch_events(service, candidates):
+    """Silence each event in the list. Returns counts dict."""
+    silenced = 0
+    errors = 0
+    for item in candidates:
+        try:
+            _patch_silence(service, item["cal_id"], item["id"])
+            silenced += 1
+            log.info('SILENCED | evt=%s | "%s" | rule=%s',
+                     item["id"], item["summary"], item["rule"])
+        except Exception as exc:
+            errors += 1
+            log.error('ERROR | evt=%s | "%s" | exc=%s',
+                      item["id"], item["summary"], exc)
+    return {"silenced": silenced, "errors": errors}
+
+
 def sweep(service, config, dry_run=False, days_override=None):
     """Run one sweep. Returns counts dict."""
     days = days_override if days_override is not None else config["scan"]["days_ahead"]
