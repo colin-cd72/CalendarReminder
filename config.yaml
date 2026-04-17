@@ -1,0 +1,24 @@
+silence_rules:
+  - name: gmail_auto_events
+    match:
+      eventType: fromGmail
+
+  - name: reclaim_by_organizer
+    match:
+      organizer_email_endswith: "@reclaim.ai"
+
+  - name: reclaim_by_extended_property
+    match:
+      has_extended_property_prefix: "reclaim"
+
+  - name: travel_title_patterns
+    match:
+      title_regex: "^(Travel Time|Travel to|Flight )"
+
+never_silence:
+  title_contains: []
+  calendar_ids: []
+
+scan:
+  days_ahead: 30
+  include_past: false
