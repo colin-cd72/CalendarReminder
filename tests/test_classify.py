@@ -105,3 +105,35 @@ def test_missing_title_does_not_crash():
     event = {"id": "e8"}
     action, rule = classify(event, TITLE_REGEX_CONFIG)
     assert action == "keep"
+
+
+NEVER_SILENCE_CONFIG = {
+    "silence_rules": [
+        {"name": "gmail_auto_events", "match": {"eventType": "fromGmail"}},
+    ],
+    "never_silence": {
+        "title_contains": ["IMPORTANT"],
+        "calendar_ids": ["work-cal@group.calendar.google.com"],
+    },
+}
+
+
+def test_never_silence_by_title_substring():
+    event = {
+        "id": "e9",
+        "summary": "IMPORTANT: Flight to Tokyo",
+        "eventType": "fromGmail",
+    }
+    action, rule = classify(event, NEVER_SILENCE_CONFIG)
+    assert action == "keep"
+
+
+def test_never_silence_by_calendar_id():
+    event = {
+        "id": "e10",
+        "summary": "Auto event",
+        "eventType": "fromGmail",
+        "_calendarId": "work-cal@group.calendar.google.com",
+    }
+    action, rule = classify(event, NEVER_SILENCE_CONFIG)
+    assert action == "keep"

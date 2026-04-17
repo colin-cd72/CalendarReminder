@@ -2,6 +2,17 @@ import re
 
 
 def classify(event, config):
+    never = config.get("never_silence") or {}
+    title = event.get("summary") or ""
+
+    for needle in never.get("title_contains") or []:
+        if needle in title:
+            return ("keep", None)
+
+    cal_id = event.get("_calendarId")
+    if cal_id and cal_id in (never.get("calendar_ids") or []):
+        return ("keep", None)
+
     for rule in config.get("silence_rules", []):
         match = rule.get("match", {})
 
@@ -21,7 +32,6 @@ def classify(event, config):
                 return ("silence", rule["name"])
 
         if "title_regex" in match:
-            title = event.get("summary") or ""
             if re.search(match["title_regex"], title):
                 return ("silence", rule["name"])
 
