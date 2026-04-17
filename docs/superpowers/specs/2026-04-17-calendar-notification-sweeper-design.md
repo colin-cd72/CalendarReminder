@@ -2,7 +2,11 @@
 
 **Date:** 2026-04-17
 **Owner:** deford@gmail.com
-**Status:** Design approved. Revised 2026-04-17 to ship as a Windows tray app packaged as a standalone `.exe` (Option D).
+**Status:** Built and shipping. Revisions:
+- 2026-04-17 — Option D (tray app + standalone .exe) adopted.
+- 2026-04-17 — Calendar-selection feature added (user picks which calendars to sweep).
+- 2026-04-17 — Preview dialog added (`--preview` flag + tray integration): shows candidates in a checkbox window before patching.
+- 2026-04-17 — Rule tuning from live runs: added `focus_time_by_title` title rule, widened travel regex to catch emoji-prefixed titles (`🚌 Travel`), fixed UTF-8 stdout on Windows consoles.
 
 ## Problem
 
@@ -93,12 +97,17 @@ Both locations matter: the **source layout** is what we build and test, the **ru
 Rule of thumb: if an event matches *any* silence rule, its reminders are cleared. If it matches none, it's left alone. `never_silence` matches override silence rules.
 
 ```yaml
-# config.yaml
+# config.yaml (shipped template; lives in %APPDATA%\CalendarReminder\ at runtime)
 silence_rules:
   # Tier 1 — Gmail-extracted events (flights, hotels, reservations, packages)
   - name: gmail_auto_events
     match:
       eventType: fromGmail
+
+  # Tier 1 — Google-native Focus Time events
+  - name: focus_time_events
+    match:
+      eventType: focusTime
 
   # Tier 1 — Reclaim, identified by organizer domain
   - name: reclaim_by_organizer
@@ -110,10 +119,15 @@ silence_rules:
     match:
       has_extended_property_prefix: "reclaim"
 
-  # Tier 3 — Title safety net
+  # Tier 3 — Title safety net (includes emoji-prefixed Reclaim blocks like "🚌 Travel")
   - name: travel_title_patterns
     match:
-      title_regex: "^(Travel Time|Travel to|Flight )"
+      title_regex: "^(Travel Time|Travel to|Flight |.+ Travel$)"
+
+  # Tier 3 — Plain-title Focus time blocks (Reclaim's focus blocks use this title)
+  - name: focus_time_by_title
+    match:
+      title_regex: "^Focus [Tt]ime$"
 
 never_silence:
   title_contains: []       # e.g. ["IMPORTANT", "DO NOT MISS"]
@@ -122,6 +136,7 @@ never_silence:
 scan:
   days_ahead: 30
   include_past: false
+  calendars: []            # list of calendar IDs to sweep; empty = prompt on first run
 ```
 
 **Reliability of each signal:**
@@ -225,13 +240,23 @@ The tray icon appears immediately when `CalendarReminder.exe` launches. Left-cli
 
 | Menu item | Action |
 |---|---|
-| Sweep now | Runs a live sweep in a background thread. Tooltip updates to "Sweeping…" then "Last: HH:MM (silenced N)". |
+| Sweep now | Runs a live sweep in a background thread. Tooltip updates to "Sweeping…" then "Last: HH:MM silenced=N kept=N". |
 | Sweep now (dry run) | Same, but `dry_run=True` — nothing is patched. |
 | Open today's log | Opens `%APPDATA%\CalendarReminder\logs\sweep-YYYY-MM-DD.log` in the default editor (`os.startfile`). |
 | Open config | Opens `%APPDATA%\CalendarReminder\config.yaml` in the default editor. |
 | Quit | Exits the tray process. No sweeps until next login or manual relaunch. |
 
 Menu actions always run sweeps on a worker thread so the tray icon stays responsive. Concurrent sweep requests are rejected with a balloon-tip notification ("Sweep already in progress").
+
+## Calendar picker & preview dialog (shared UI components)
+
+Two tkinter dialogs live in `calendar_reminder/calendars.py` and are reused by both entry points:
+
+**`pick_calendars_dialog(calendars, currently_selected=None)`** — scrollable checkbox list of the user's writable calendars. Pre-checks the primary (or `currently_selected` if passed). "Select All" / "Clear All" helpers. Returns list of selected IDs; Cancel returns the pre-existing selection unchanged. Launched from first-run flow and from the CLI's `--select-calendars`.
+
+**`preview_sweep_dialog(candidates)`** — scrollable checkbox list of events about to be silenced. Each row shows title + matched rule name. Pre-checks every candidate. "Silence checked events" / "Cancel" buttons. Returns the approved subset (for `patch_events()`) or `None` if cancelled. Triggered by the CLI's `--preview` flag.
+
+The CLI has a terminal-based fallback (`pick_calendars_interactive`) gated by `--cli-picker` for headless/SSH use.
 
 ## Scheduling (in-app timer)
 
