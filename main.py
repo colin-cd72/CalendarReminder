@@ -6,7 +6,11 @@ from datetime import date
 from pathlib import Path
 
 from calendar_reminder.auth import get_service
-from calendar_reminder.calendars import list_user_calendars, pick_calendars_interactive
+from calendar_reminder.calendars import (
+    list_user_calendars,
+    pick_calendars_dialog,
+    pick_calendars_interactive,
+)
 from calendar_reminder.config import load_config, save_config
 from calendar_reminder.sweeper import sweep
 
@@ -51,6 +55,8 @@ def main(argv=None):
                         help="List accessible calendars and exit.")
     parser.add_argument("--select-calendars", action="store_true",
                         help="Run calendar picker, save selection, and exit (no sweep).")
+    parser.add_argument("--cli-picker", action="store_true",
+                        help="Use the terminal picker instead of the GUI dialog.")
     args = parser.parse_args(argv)
 
     project_root = Path(__file__).parent
@@ -84,7 +90,15 @@ def main(argv=None):
         if not cals:
             print("No writable calendars found.", file=sys.stderr)
             return 4
-        selected = pick_calendars_interactive(cals)
+        if args.cli_picker:
+            selected = pick_calendars_interactive(cals)
+        else:
+            selected = pick_calendars_dialog(
+                cals, currently_selected=cfg["scan"].get("calendars"),
+            )
+        if not selected:
+            print("No calendars selected. Nothing to do.", file=sys.stderr)
+            return 5
         cfg["scan"]["calendars"] = selected
         save_config(cfg, args.config)
         print(f"Saved {len(selected)} calendar(s) to {args.config}")
