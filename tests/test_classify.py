@@ -77,3 +77,31 @@ def test_missing_extended_properties_is_kept():
     event = {"id": "e5", "summary": "Lunch"}
     action, rule = classify(event, EXT_PROP_CONFIG)
     assert action == "keep"
+
+
+TITLE_REGEX_CONFIG = {
+    "silence_rules": [
+        {"name": "travel_title_patterns",
+         "match": {"title_regex": "^(Travel Time|Travel to|Flight )"}},
+    ],
+    "never_silence": {"title_contains": [], "calendar_ids": []},
+}
+
+
+def test_title_regex_matches():
+    event = {"id": "e6", "summary": "Travel Time to SFO"}
+    action, rule = classify(event, TITLE_REGEX_CONFIG)
+    assert action == "silence"
+    assert rule == "travel_title_patterns"
+
+
+def test_title_regex_non_match_is_kept():
+    event = {"id": "e7", "summary": "Dentist appointment"}
+    action, rule = classify(event, TITLE_REGEX_CONFIG)
+    assert action == "keep"
+
+
+def test_missing_title_does_not_crash():
+    event = {"id": "e8"}
+    action, rule = classify(event, TITLE_REGEX_CONFIG)
+    assert action == "keep"

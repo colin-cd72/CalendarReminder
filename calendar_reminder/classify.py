@@ -1,3 +1,6 @@
+import re
+
+
 def classify(event, config):
     for rule in config.get("silence_rules", []):
         match = rule.get("match", {})
@@ -15,6 +18,11 @@ def classify(event, config):
             prefix = match["has_extended_property_prefix"]
             private = (event.get("extendedProperties") or {}).get("private") or {}
             if any(k.startswith(prefix) for k in private.keys()):
+                return ("silence", rule["name"])
+
+        if "title_regex" in match:
+            title = event.get("summary") or ""
+            if re.search(match["title_regex"], title):
                 return ("silence", rule["name"])
 
     return ("keep", None)
