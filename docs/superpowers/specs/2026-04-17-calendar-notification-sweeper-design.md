@@ -187,11 +187,37 @@ A tiny cleanup step at the top of each run deletes log files older than 30 days.
 ## Authentication
 
 - **OAuth client type:** Desktop app (Google Cloud Console)
-- **Scope:** `https://www.googleapis.com/auth/calendar.events`
-  - Grants read + patch for events only. No access to calendar lists, free/busy, or other user data.
+- **Scopes:**
+  - `https://www.googleapis.com/auth/calendar.events` — read + patch events on calendars the user can access
+  - `https://www.googleapis.com/auth/calendar.calendarlist.readonly` — list the user's calendars (needed for the calendar picker)
+  Two narrow scopes rather than the broader `calendar` scope, to keep the permission footprint minimal.
 - **First run:** opens system browser → user approves → token saved to `token.json`.
 - **Subsequent runs:** `token.json` auto-refreshes; no browser prompt.
+- **Adding a scope invalidates the old token** — after the scope change, users re-consent once.
 - **`credentials.json` and `token.json` are gitignored.**
+
+## Calendar selection
+
+The user configures which calendars to sweep via `scan.calendars` in `config.yaml` (a list of calendar IDs, e.g. `["primary", "xyz@group.calendar.google.com"]`). If this field is missing or empty, the app launches an interactive picker on next run:
+
+```
+Available calendars:
+  [1] deford@gmail.com — primary (owner)
+  [2] Reclaim — Personal Calendar (owner)
+  [3] Work shared — team@example.com (writer)
+  ...
+Pick (comma-separated numbers, or 'all'):
+```
+
+The selection is written back to `config.yaml`. Two explicit CLI flags expose the same mechanism:
+- `--list-calendars` — print accessible calendars and exit (no config change).
+- `--select-calendars` — force a re-run of the picker, save, exit (no sweep).
+
+Only **writable** calendars (`accessRole` in {`owner`, `writer`}) are offered — we can't patch reminders on read-only calendars. The picker filters them out.
+
+The tray app (Task 17) wraps the same underlying picker in a tkinter checkbox dialog; both entry points write to the same `scan.calendars` field.
+
+The sweeper iterates over each configured calendar ID, injecting that ID into each fetched event's `_calendarId` field so the classifier's `never_silence.calendar_ids` override and the patch step can use the correct calendar.
 
 ## Tray UI
 

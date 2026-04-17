@@ -1036,6 +1036,543 @@ git commit -m "feat(cli): add main.py entry with dry-run, days, verbose flags"
 
 ---
 
+## Task 10a: Calendar list + interactive picker module (TDD)
+
+**Files:**
+- Create: `calendar_reminder/calendars.py`
+- Create: `tests/test_calendars.py`
+- Modify: `calendar_reminder/auth.py` (expand SCOPES)
+- Delete (if exists): `token.json` — old scopes invalidate the stored token; user re-consents on next real run.
+
+- [ ] **Step 1: Expand OAuth scopes in `auth.py`**
+
+Replace the `SCOPES` constant in `calendar_reminder/auth.py` with:
+
+```python
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+]
+```
+
+- [ ] **Step 2: Delete any existing `token.json`**
+
+```bash
+rm -f "D:/Calendar Reminder/token.json"
+```
+
+(If the file doesn't exist, no-op.)
+
+- [ ] **Step 3: Write failing tests**
+
+Create `tests/test_calendars.py`:
+
+```python
+from calendar_reminder.calendars import list_user_calendars, pick_calendars_interactive
+
+
+class _Exec:
+    def __init__(self, payload):
+        self._p = payload
+
+    def execute(self):
+        return self._p
+
+
+class FakeCalendarList:
+    def __init__(self, items):
+        self._items = items
+
+    def list(self):
+        return _Exec({"items": self._items})
+
+
+class FakeService:
+    def __init__(self, items):
+        self._cl = FakeCalendarList(items)
+
+    def calendarList(self):
+        return self._cl
+
+
+def test_list_user_calendars_filters_to_writable():
+    svc = FakeService([
+        {"id": "primary", "summary": "me@example.com", "primary": True, "accessRole": "owner"},
+        {"id": "holidays@group", "summary": "Holidays", "accessRole": "reader"},
+        {"id": "reclaim@group", "summary": "Reclaim", "accessRole": "writer"},
+    ])
+    cals = list_user_calendars(svc)
+    assert [c["id"] for c in cals] == ["primary", "reclaim@group"]
+
+
+def test_list_user_calendars_missing_summary_fallback():
+    svc = FakeService([{"id": "x@y", "accessRole": "owner"}])
+    cals = list_user_calendars(svc)
+    assert cals[0]["summary"] == "(no name)"
+    assert cals[0]["primary"] is False
+
+
+def test_pick_calendars_interactive_comma_separated(monkeypatch):
+    cals = [
+        {"id": "a", "summary": "A", "primary": False, "accessRole": "owner"},
+        {"id": "b", "summary": "B", "primary": False, "accessRole": "owner"},
+        {"id": "c", "summary": "C", "primary": False, "accessRole": "owner"},
+    ]
+    monkeypatch.setattr("builtins.input", lambda _: "1,3")
+    selected = pick_calendars_interactive(cals)
+    assert selected == ["a", "c"]
+
+
+def test_pick_calendars_interactive_all(monkeypatch):
+    cals = [
+        {"id": "a", "summary": "A", "primary": False, "accessRole": "owner"},
+        {"id": "b", "summary": "B", "primary": False, "accessRole": "owner"},
+    ]
+    monkeypatch.setattr("builtins.input", lambda _: "all")
+    selected = pick_calendars_interactive(cals)
+    assert selected == ["a", "b"]
+
+
+def test_pick_calendars_interactive_reprompts_on_bad_input(monkeypatch, capsys):
+    cals = [
+        {"id": "a", "summary": "A", "primary": False, "accessRole": "owner"},
+        {"id": "b", "summary": "B", "primary": False, "accessRole": "owner"},
+    ]
+    inputs = iter(["99", "xyz", "2"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    selected = pick_calendars_interactive(cals)
+    assert selected == ["b"]
+```
+
+- [ ] **Step 4: Run tests — fails (module missing)**
+
+```bash
+.venv/Scripts/pytest.exe tests/test_calendars.py -v
+```
+
+- [ ] **Step 5: Implement `calendars.py`**
+
+Create `calendar_reminder/calendars.py`:
+
+```python
+def list_user_calendars(service):
+    """Return writable calendars: [{id, summary, primary, accessRole}, ...]"""
+    resp = service.calendarList().list().execute()
+    out = []
+    for item in resp.get("items", []):
+        if item.get("accessRole") not in ("owner", "writer"):
+            continue
+        out.append({
+            "id": item["id"],
+            "summary": item.get("summary", "(no name)"),
+            "primary": item.get("primary", False),
+            "accessRole": item["accessRole"],
+        })
+    return out
+
+
+def pick_calendars_interactive(calendars):
+    """Prompt via stdin. Returns list of selected calendar IDs."""
+    print("\nAvailable calendars:")
+    for i, c in enumerate(calendars, 1):
+        primary = " (primary)" if c["primary"] else ""
+        print(f"  [{i}] {c['summary']} — {c['id']} [{c['accessRole']}]{primary}")
+
+    while True:
+        raw = input("\nPick (comma-separated numbers, or 'all'): ").strip()
+        if raw.lower() == "all":
+            return [c["id"] for c in calendars]
+        try:
+            indices = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            if indices and all(1 <= i <= len(calendars) for i in indices):
+                return [calendars[i - 1]["id"] for i in indices]
+        except ValueError:
+            pass
+        print("Invalid input. Try again.")
+```
+
+- [ ] **Step 6: Run tests**
+
+```bash
+.venv/Scripts/pytest.exe -v
+```
+
+Expected: all prior tests + 5 new calendar tests pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add calendar_reminder/calendars.py calendar_reminder/auth.py tests/test_calendars.py
+git commit -m "feat(calendars): list and interactive-pick writable calendars"
+```
+
+---
+
+## Task 10b: Sweeper iterates configured calendars
+
+**Files:**
+- Modify: `calendar_reminder/sweeper.py`
+- Modify: `tests/test_sweeper.py`
+
+- [ ] **Step 1: Update `sweep()` to read from `config["scan"]["calendars"]`**
+
+In `calendar_reminder/sweeper.py`, replace the body of `sweep()` with:
+
+```python
+def sweep(service, config, dry_run=False, days_override=None):
+    """Run one sweep. Returns counts dict."""
+    days = days_override if days_override is not None else config["scan"]["days_ahead"]
+    calendar_ids = config["scan"].get("calendars") or ["primary"]
+    now = _now_utc()
+    time_min = now.isoformat()
+    time_max = (now + dt.timedelta(days=days)).isoformat()
+
+    counts = {"scanned": 0, "silenced": 0, "kept": 0, "skipped": 0, "errors": 0}
+    start = time.monotonic()
+
+    events = []
+    for cal_id in calendar_ids:
+        events.extend(_list_events(service, cal_id, time_min, time_max))
+
+    for ev in events:
+        counts["scanned"] += 1
+        summary = ev.get("summary", "")
+        ev_id = ev.get("id", "?")
+        cal_id = ev.get("_calendarId", "primary")
+        try:
+            action, rule = classify(ev, config)
+            if action == "silence":
+                if _already_silenced(ev):
+                    counts["skipped"] += 1
+                    log.info('SKIP | evt=%s | "%s" | reason=already_silenced', ev_id, summary)
+                    continue
+                if dry_run:
+                    counts["silenced"] += 1
+                    log.info('DRY-RUN-SILENCE | evt=%s | "%s" | rule=%s', ev_id, summary, rule)
+                else:
+                    _patch_silence(service, cal_id, ev_id)
+                    counts["silenced"] += 1
+                    log.info('SILENCED | evt=%s | "%s" | rule=%s', ev_id, summary, rule)
+            else:
+                counts["kept"] += 1
+                log.debug('KEPT | evt=%s | "%s" | rule=none', ev_id, summary)
+        except Exception as exc:
+            counts["errors"] += 1
+            log.error('ERROR | evt=%s | "%s" | exc=%s', ev_id, summary, exc)
+
+    duration = time.monotonic() - start
+    log.info(
+        "SUMMARY: scanned=%d silenced=%d kept=%d skipped=%d errors=%d duration=%.1fs",
+        counts["scanned"], counts["silenced"], counts["kept"],
+        counts["skipped"], counts["errors"], duration,
+    )
+    return counts
+```
+
+Key changes:
+- Reads `calendar_ids = config["scan"].get("calendars") or ["primary"]`
+- Iterates over each calendar when fetching events
+- `_patch_silence` now uses `ev["_calendarId"]` (the calendar we fetched from) instead of hardcoded `"primary"`
+
+- [ ] **Step 2: Add multi-calendar test**
+
+Modify `tests/test_sweeper.py`. Replace the `FakeEvents` class to take per-calendar event dicts, and the `FakeService` to dispatch list calls by calendarId:
+
+```python
+from calendar_reminder.sweeper import sweep
+
+
+class _Exec:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def execute(self):
+        return self._payload
+
+
+class FakeEvents:
+    def __init__(self, per_calendar_items, patched):
+        self._per_calendar = per_calendar_items
+        self._patched = patched
+
+    def list(self, **kwargs):
+        cal_id = kwargs["calendarId"]
+        return _Exec({"items": list(self._per_calendar.get(cal_id, []))})
+
+    def patch(self, calendarId, eventId, body):
+        self._patched.append((calendarId, eventId, body))
+        return _Exec({})
+
+
+class FakeService:
+    def __init__(self, per_calendar_items):
+        self.patched = []
+        self._events = FakeEvents(per_calendar_items, self.patched)
+
+    def events(self):
+        return self._events
+
+
+MIN_CONFIG_PRIMARY = {
+    "silence_rules": [{"name": "gmail_auto_events", "match": {"eventType": "fromGmail"}}],
+    "never_silence": {"title_contains": [], "calendar_ids": []},
+    "scan": {"days_ahead": 7, "include_past": False, "calendars": ["primary"]},
+}
+
+MULTI_CONFIG = {
+    "silence_rules": [{"name": "gmail_auto_events", "match": {"eventType": "fromGmail"}}],
+    "never_silence": {"title_contains": [], "calendar_ids": []},
+    "scan": {"days_ahead": 7, "include_past": False, "calendars": ["primary", "reclaim@group"]},
+}
+
+
+def test_sweep_silences_matching_event_and_skips_already_silenced():
+    svc = FakeService({
+        "primary": [
+            {"id": "a", "summary": "Flight", "eventType": "fromGmail",
+             "reminders": {"useDefault": True}},
+            {"id": "b", "summary": "Already quiet", "eventType": "fromGmail",
+             "reminders": {"useDefault": False, "overrides": []}},
+            {"id": "c", "summary": "Real meeting",
+             "reminders": {"useDefault": True}},
+        ],
+    })
+    counts = sweep(svc, MIN_CONFIG_PRIMARY, dry_run=False)
+    assert counts == {"scanned": 3, "silenced": 1, "kept": 1, "skipped": 1, "errors": 0}
+    assert svc.patched == [
+        ("primary", "a", {"reminders": {"useDefault": False, "overrides": []}})
+    ]
+
+
+def test_sweep_dry_run_does_not_patch():
+    svc = FakeService({
+        "primary": [
+            {"id": "a", "summary": "Flight", "eventType": "fromGmail",
+             "reminders": {"useDefault": True}},
+        ],
+    })
+    counts = sweep(svc, MIN_CONFIG_PRIMARY, dry_run=True)
+    assert counts["silenced"] == 1
+    assert svc.patched == []
+
+
+def test_sweep_iterates_multiple_calendars_and_patches_each_on_its_own_calendar():
+    svc = FakeService({
+        "primary": [
+            {"id": "a", "summary": "Flight", "eventType": "fromGmail",
+             "reminders": {"useDefault": True}},
+        ],
+        "reclaim@group": [
+            {"id": "r", "summary": "Focus Time", "eventType": "fromGmail",
+             "reminders": {"useDefault": True}},
+        ],
+    })
+    counts = sweep(svc, MULTI_CONFIG, dry_run=False)
+    assert counts["scanned"] == 2
+    assert counts["silenced"] == 2
+    assert sorted(svc.patched) == sorted([
+        ("primary", "a", {"reminders": {"useDefault": False, "overrides": []}}),
+        ("reclaim@group", "r", {"reminders": {"useDefault": False, "overrides": []}}),
+    ])
+
+
+def test_sweep_falls_back_to_primary_when_calendars_missing():
+    svc = FakeService({
+        "primary": [
+            {"id": "a", "summary": "Flight", "eventType": "fromGmail",
+             "reminders": {"useDefault": True}},
+        ],
+    })
+    cfg_no_calendars = {
+        "silence_rules": [{"name": "gmail_auto_events", "match": {"eventType": "fromGmail"}}],
+        "never_silence": {"title_contains": [], "calendar_ids": []},
+        "scan": {"days_ahead": 7, "include_past": False},
+    }
+    counts = sweep(svc, cfg_no_calendars, dry_run=False)
+    assert counts["silenced"] == 1
+    assert svc.patched == [("primary", "a", {"reminders": {"useDefault": False, "overrides": []}})]
+```
+
+- [ ] **Step 3: Run tests**
+
+```bash
+.venv/Scripts/pytest.exe -v
+```
+
+Expected: all prior tests + new multi-calendar tests pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add calendar_reminder/sweeper.py tests/test_sweeper.py
+git commit -m "feat(sweeper): iterate over configured calendars, patch on correct one"
+```
+
+---
+
+## Task 10c: CLI flags for calendar selection + auto-picker
+
+**Files:**
+- Modify: `calendar_reminder/config.py` (add `save_config`)
+- Modify: `main.py` (new flags, auto-picker on missing config)
+- Modify: `tests/test_config.py` (round-trip test)
+- Modify: `config.yaml` — add `scan.calendars: []` template entry
+
+- [ ] **Step 1: Add `save_config` to `config.py`**
+
+Append to `calendar_reminder/config.py`:
+
+```python
+def save_config(cfg, path):
+    """Write config dict back to YAML. Loses comments (config.yaml is machine-manageable)."""
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+```
+
+- [ ] **Step 2: Add round-trip test to `tests/test_config.py`**
+
+Append:
+
+```python
+def test_save_and_reload_config_round_trip(tmp_path):
+    from calendar_reminder.config import save_config
+
+    path = tmp_path / "roundtrip.yaml"
+    cfg = {
+        "silence_rules": [{"name": "r", "match": {"eventType": "fromGmail"}}],
+        "never_silence": {"title_contains": [], "calendar_ids": []},
+        "scan": {"days_ahead": 14, "include_past": False, "calendars": ["primary", "x@y"]},
+    }
+    save_config(cfg, str(path))
+    loaded = load_config(str(path))
+    assert loaded["scan"]["calendars"] == ["primary", "x@y"]
+    assert loaded["scan"]["days_ahead"] == 14
+    assert loaded["silence_rules"][0]["name"] == "r"
+```
+
+- [ ] **Step 3: Update `main.py` with new flags**
+
+Edit `main.py`:
+
+Add to imports:
+
+```python
+from calendar_reminder.calendars import list_user_calendars, pick_calendars_interactive
+from calendar_reminder.config import load_config, save_config
+```
+
+(Remove the existing `from calendar_reminder.config import load_config` if it's there separately.)
+
+Add two new flags to the argparse section:
+
+```python
+    parser.add_argument("--list-calendars", action="store_true",
+                        help="List accessible calendars and exit.")
+    parser.add_argument("--select-calendars", action="store_true",
+                        help="Run calendar picker, save selection, and exit (no sweep).")
+```
+
+Add handling logic AFTER the config load and BEFORE `sweep()`. The full replacement for the `main()` function body (from `parser.add_argument` through `return 0 if counts...`):
+
+```python
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Sweep auto-inserted Google Calendar notifications.")
+    parser.add_argument("--dry-run", action="store_true", help="Log what would change, don't modify events.")
+    parser.add_argument("--days", type=int, default=None, help="Scan window override (days ahead).")
+    parser.add_argument("--verbose", action="store_true", help="Include KEPT events in log output.")
+    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    parser.add_argument("--list-calendars", action="store_true",
+                        help="List accessible calendars and exit.")
+    parser.add_argument("--select-calendars", action="store_true",
+                        help="Run calendar picker, save selection, and exit (no sweep).")
+    args = parser.parse_args(argv)
+
+    project_root = Path(__file__).parent
+    os.chdir(project_root)
+
+    log_dir = project_root / "logs"
+    _setup_logging(log_dir, args.verbose)
+    _rotate_logs(log_dir)
+
+    try:
+        cfg = load_config(args.config)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Config error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        service = get_service()
+    except FileNotFoundError as e:
+        print(f"Auth error: {e}", file=sys.stderr)
+        return 3
+
+    if args.list_calendars:
+        cals = list_user_calendars(service)
+        for c in cals:
+            mark = "*" if c["primary"] else " "
+            print(f"{mark} {c['id']} | {c['summary']} | {c['accessRole']}")
+        return 0
+
+    if args.select_calendars or not cfg["scan"].get("calendars"):
+        cals = list_user_calendars(service)
+        if not cals:
+            print("No writable calendars found.", file=sys.stderr)
+            return 4
+        selected = pick_calendars_interactive(cals)
+        cfg["scan"]["calendars"] = selected
+        save_config(cfg, args.config)
+        print(f"Saved {len(selected)} calendar(s) to {args.config}")
+        if args.select_calendars:
+            return 0
+
+    counts = sweep(service, cfg, dry_run=args.dry_run, days_override=args.days)
+    return 0 if counts["errors"] == 0 else 1
+```
+
+- [ ] **Step 4: Update `config.yaml` template**
+
+Edit `config.yaml` at project root. Change the `scan:` section from:
+
+```yaml
+scan:
+  days_ahead: 30
+  include_past: false
+```
+
+to:
+
+```yaml
+scan:
+  days_ahead: 30
+  include_past: false
+  calendars: []    # list of calendar IDs to sweep; empty = prompt on first run
+```
+
+- [ ] **Step 5: Verify tests still pass**
+
+```bash
+.venv/Scripts/pytest.exe -v
+```
+
+Expected: all prior tests + new `test_save_and_reload_config_round_trip` pass.
+
+- [ ] **Step 6: Smoke-test `--help`**
+
+```bash
+.venv/Scripts/python.exe main.py --help
+```
+
+Expected: help text now lists 6 flags including `--list-calendars` and `--select-calendars`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add main.py calendar_reminder/config.py tests/test_config.py config.yaml
+git commit -m "feat(cli): calendar-selection flags and auto-picker on first run"
+```
+
+---
+
 ## Task 11: Update `.gitignore` for runtime artifacts
 
 **Files:**
