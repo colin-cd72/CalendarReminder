@@ -1,10 +1,9 @@
 import argparse
 import logging
-import os
 import sys
 from datetime import date
-from pathlib import Path
 
+from calendar_reminder import paths
 from calendar_reminder.auth import get_service
 from calendar_reminder.calendars import (
     list_user_calendars,
@@ -56,7 +55,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Log what would change, don't modify events.")
     parser.add_argument("--days", type=int, default=None, help="Scan window override (days ahead).")
     parser.add_argument("--verbose", action="store_true", help="Include KEPT events in log output.")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    parser.add_argument("--config", default=None, help="Path to config.yaml (default: app data dir).")
     parser.add_argument("--list-calendars", action="store_true",
                         help="List accessible calendars and exit.")
     parser.add_argument("--select-calendars", action="store_true",
@@ -67,22 +66,23 @@ def main(argv=None):
                         help="Show a preview dialog listing events about to be silenced; "
                              "user confirms which to patch.")
     args = parser.parse_args(argv)
+    config_file = args.config or str(paths.config_path())
 
-    project_root = Path(__file__).parent
-    os.chdir(project_root)
-
-    log_dir = project_root / "logs"
-    _setup_logging(log_dir, args.verbose)
-    _rotate_logs(log_dir)
+    paths.ensure_app_data_dir()
+    _setup_logging(paths.log_dir(), args.verbose)
+    _rotate_logs(paths.log_dir())
 
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(config_file)
     except (FileNotFoundError, ValueError) as e:
         print(f"Config error: {e}", file=sys.stderr)
         return 2
 
     try:
-        service = get_service()
+        service = get_service(
+            credentials_path=str(paths.credentials_path()),
+            token_path=str(paths.token_path()),
+        )
     except FileNotFoundError as e:
         print(f"Auth error: {e}", file=sys.stderr)
         return 3
@@ -109,8 +109,8 @@ def main(argv=None):
             print("No calendars selected. Nothing to do.", file=sys.stderr)
             return 5
         cfg["scan"]["calendars"] = selected
-        save_config(cfg, args.config)
-        print(f"Saved {len(selected)} calendar(s) to {args.config}")
+        save_config(cfg, config_file)
+        print(f"Saved {len(selected)} calendar(s) to {config_file}")
         if args.select_calendars:
             return 0
 
