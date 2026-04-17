@@ -22,3 +22,4 @@ never_silence:
 scan:
   days_ahead: 30
   include_past: false
+  calendars: []    # list of calendar IDs to sweep; empty = prompt on first run

@@ -19,3 +19,9 @@ def load_config(path):
     cfg["scan"].setdefault("include_past", False)
 
     return cfg
+
+
+def save_config(cfg, path):
+    """Write config dict back to YAML. Loses comments (config.yaml is machine-manageable)."""
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)

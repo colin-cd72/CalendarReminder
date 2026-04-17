@@ -34,3 +34,19 @@ def test_load_config_rejects_missing_silence_rules(tmp_path):
     yaml_path.write_text("scan:\n  days_ahead: 30\n")
     with pytest.raises(ValueError, match="silence_rules"):
         load_config(str(yaml_path))
+
+
+def test_save_and_reload_config_round_trip(tmp_path):
+    from calendar_reminder.config import save_config
+
+    path = tmp_path / "roundtrip.yaml"
+    cfg = {
+        "silence_rules": [{"name": "r", "match": {"eventType": "fromGmail"}}],
+        "never_silence": {"title_contains": [], "calendar_ids": []},
+        "scan": {"days_ahead": 14, "include_past": False, "calendars": ["primary", "x@y"]},
+    }
+    save_config(cfg, str(path))
+    loaded = load_config(str(path))
+    assert loaded["scan"]["calendars"] == ["primary", "x@y"]
+    assert loaded["scan"]["days_ahead"] == 14
+    assert loaded["silence_rules"][0]["name"] == "r"
