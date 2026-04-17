@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-17
 **Owner:** deford@gmail.com
-**Status:** Design approved, pending spec review
+**Status:** Design approved. Revised 2026-04-17 to ship as a Windows tray app packaged as a standalone `.exe` (Option D).
 
 ## Problem
 
@@ -24,46 +24,69 @@ A local, scheduled tool that, once a day, sweeps upcoming calendar events and re
 
 ## Approach
 
-A Python CLI script authenticating to Google Calendar via OAuth, run daily by Windows Task Scheduler on the user's local PC. Classification rules live in a user-editable YAML config. Every matched event is logged with the rule that caught it, enabling after-the-fact review and rule tuning.
+A Windows tray application, packaged as a single `.exe` via PyInstaller, that authenticates to Google Calendar via OAuth and runs the sweep once daily on an internal timer. The tray gives the user a visible entry point (sweep-now, open log, open config) without interfering with the default unattended behavior. Classification rules live in a user-editable YAML config in `%APPDATA%\CalendarReminder\`. The same codebase exposes a CLI (`main.py`) for headless/dev use.
 
 Rejected alternatives:
 - **Google Calendar built-in settings only** — too coarse; can't selectively handle the Reclaim + Gmail combination and can't catch edge cases.
-- **Hybrid (settings + logging script)** — adds complexity without a clear win once we're already building a script.
+- **Pure CLI with Windows Task Scheduler** — works, but the user explicitly asked for an app with a visible on-screen presence.
+- **Full GUI window** — overkill for rarely-touched configuration; tray is enough.
 
 ## Architecture
 
-**Runtime shape:** one stateless CLI script. Each run: authenticate → fetch upcoming events → classify each → patch the ones matching silence rules → log → exit. No daemon, no server.
+**Runtime shape:** a long-running tray process that launches at Windows login and lives in the system tray. A background timer thread checks hourly whether the last sweep was ≥24h ago and triggers one if so. The tray menu also lets the user fire a sweep or dry-run on demand. Each individual sweep is still the stateless pattern from the original design: authenticate → fetch upcoming events → classify each → patch the ones matching silence rules → log → return counts. No daemon service, no server, no cloud.
 
-**Directory layout** (`D:\Calendar Reminder\`):
+**Source layout** (dev tree; same as GitHub repo):
 
 ```
 calendar_reminder/
-  main.py              # CLI entry point
-  auth.py              # OAuth token load/refresh/store
-  classify.py          # Pure function: event -> ("silence", reason) | ("keep", None)
-  sweeper.py           # Fetches events, calls classifier, patches reminders
-  config.yaml          # User-editable silence rules
-  credentials.json     # OAuth client secret (gitignored)
-  token.json           # User OAuth token (gitignored)
-  logs/                # Daily log files (gitignored)
-    sweep-YYYY-MM-DD.log
-  tests/
-    test_classify.py   # Unit tests for classifier
-  requirements.txt
-  .gitignore
+  __init__.py
+  paths.py             # Resolves runtime dirs (frozen vs dev)
+  config.py            # Loads + validates config.yaml
+  classify.py          # Pure classifier function
+  auth.py              # OAuth + service builder
+  sweeper.py           # Fetch, classify, patch, log
+  tray.py              # pystray UI, daily timer, first-run dialog
+main.py                # CLI entry (dev + headless fallback)
+config.yaml            # Default/template config (shipped with exe)
+icon.ico               # Tray + exe icon
+CalendarReminder.spec  # PyInstaller build recipe
+tests/
+  __init__.py
+  test_classify.py
+  test_config.py
+  test_sweeper.py
+requirements.txt
+.gitignore
 ```
+
+**Runtime data layout** (per-user; created on first run by the tray app):
+
+```
+%APPDATA%\CalendarReminder\
+  config.yaml          # Live config (copied from shipped template on first run)
+  credentials.json     # OAuth client secret (user drops this in — see setup)
+  token.json           # OAuth user token (written by auth.py on first consent)
+  state.json           # {"last_sweep_at": "2026-04-17T06:01:02Z"}
+  logs\
+    sweep-YYYY-MM-DD.log
+```
+
+Both locations matter: the **source layout** is what we build and test, the **runtime data layout** is where the packaged exe reads and writes. `paths.py` returns the right base directory for the current mode by checking `sys.frozen`.
 
 **Component responsibilities:**
 
 | File | Responsibility |
 |---|---|
-| `main.py` | CLI. Flags: `--dry-run`, `--days N` (default 30), `--verbose`. |
-| `auth.py` | One public function `get_service()` that returns an authenticated `googleapiclient` service. Handles first-run browser flow and token refresh. |
-| `classify.py` | Pure function `classify(event, config) -> ("silence", rule_name) | ("keep", None)`. No side effects; easily unit-tested. |
-| `sweeper.py` | Orchestration: fetch events for window, call `classify` per event, patch reminders when silenced and not already empty, emit log lines. |
-| `config.yaml` | Silence rules, never-silence allow-list, scan window settings. |
+| `paths.py` | `app_data_dir()` returns `%APPDATA%\CalendarReminder` when frozen, `Path.cwd()` when running from source. Also convenience helpers for config/creds/token/state/log paths. |
+| `config.py` | `load_config(path)`: parse YAML, validate required keys, fill defaults. |
+| `classify.py` | Pure function `classify(event, config) -> ("silence", rule_name) | ("keep", None)`. |
+| `auth.py` | `get_service(credentials_path, token_path)`: OAuth flow + token refresh, returns authenticated Calendar service. |
+| `sweeper.py` | `sweep(service, config, dry_run=False, days_override=None) -> counts dict`. Orchestrates fetch → classify → patch → log. |
+| `tray.py` | System-tray UI (pystray). Menu actions, daily timer thread, first-run setup dialog, state.json management. |
+| `main.py` | Argparse CLI. Calls `sweep()` once and exits. Used for dev, debug, and headless runs. |
+| `CalendarReminder.spec` | PyInstaller one-file recipe. Entry point: `tray.py`. Bundles `icon.ico` and the shipped `config.yaml` template. |
 
-**Idempotency:** events whose `reminders.overrides` is already empty and `useDefault` is already false are logged as SKIP and not patched. Running the script 10 times in a row has the same effect as running it once.
+**Idempotency:** events whose `reminders.overrides` is already empty and `useDefault` is already `false` are logged as SKIP and not patched. Running the sweep 10 times in a row has the same effect as running it once.
 
 ## Classification rules
 
@@ -170,14 +193,54 @@ A tiny cleanup step at the top of each run deletes log files older than 30 days.
 - **Subsequent runs:** `token.json` auto-refreshes; no browser prompt.
 - **`credentials.json` and `token.json` are gitignored.**
 
-## Scheduling
+## Tray UI
 
-Windows Task Scheduler task:
+The tray icon appears immediately when `CalendarReminder.exe` launches. Left-click is a no-op; right-click opens the menu:
 
-- **Trigger:** Daily at 06:00 local time.
-- **Action:** `pythonw.exe D:\Calendar Reminder\main.py` (no console window).
-- **Settings:** "Run whether user is logged on or not", "If task is missed, run as soon as possible".
-- **Kill switch:** disable the task in Task Scheduler; no other rollback needed.
+| Menu item | Action |
+|---|---|
+| Sweep now | Runs a live sweep in a background thread. Tooltip updates to "Sweeping…" then "Last: HH:MM (silenced N)". |
+| Sweep now (dry run) | Same, but `dry_run=True` — nothing is patched. |
+| Open today's log | Opens `%APPDATA%\CalendarReminder\logs\sweep-YYYY-MM-DD.log` in the default editor (`os.startfile`). |
+| Open config | Opens `%APPDATA%\CalendarReminder\config.yaml` in the default editor. |
+| Quit | Exits the tray process. No sweeps until next login or manual relaunch. |
+
+Menu actions always run sweeps on a worker thread so the tray icon stays responsive. Concurrent sweep requests are rejected with a balloon-tip notification ("Sweep already in progress").
+
+## Scheduling (in-app timer)
+
+The tray app owns the schedule. Logic, running on a background thread:
+
+```
+every 60 minutes:
+    read state.json -> last_sweep_at
+    if now - last_sweep_at >= 24h:
+        run sweep(dry_run=False)
+        on success: write now to state.json
+```
+
+- **Auto-start on Windows login:** a `.lnk` shortcut is placed in the user's Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`) by the first-run flow.
+- **If the PC is off:** the timer naturally catches up — the next tick after login sees a stale `last_sweep_at` and runs.
+- **Kill switch:** right-click tray → Quit. To disable permanently, delete the Startup shortcut (the first-run flow can also do this via an "Unregister auto-start" dev CLI flag).
+
+## First-run setup flow
+
+On tray launch, the app:
+
+1. Ensures `%APPDATA%\CalendarReminder\` exists.
+2. If `config.yaml` is missing there, copies the shipped template.
+3. Checks for `credentials.json` in that directory.
+4. If missing: shows a tkinter dialog with step-by-step OAuth client setup instructions and two buttons — "Open Google Cloud Console" (launches browser to the credentials page) and "I've placed credentials.json — Continue". The dialog blocks until the file exists or the user cancels.
+5. If `token.json` is missing: the first actual sweep (triggered by the user from the menu) will open the consent browser. No forced pre-consent — we let the user control the timing.
+6. On first successful sweep, creates the Startup shortcut if it doesn't exist.
+
+## Packaging
+
+- **Tool:** PyInstaller, one-file mode.
+- **Spec:** `CalendarReminder.spec` at project root. Entry point `tray.py`. Bundles `icon.ico` and the template `config.yaml`. Windowed (no console).
+- **Build:** `pyinstaller CalendarReminder.spec` → produces `dist\CalendarReminder.exe`.
+- **Distribution:** the `.exe` alone is enough — no installer. User double-clicks; it self-initializes `%APPDATA%\CalendarReminder\`, prompts for credentials, adds the Startup shortcut.
+- **Not shipped in the exe:** `credentials.json`, `token.json`, `state.json`, logs. All user-specific, all stay in `%APPDATA%`.
 
 ## Testing
 
@@ -191,28 +254,33 @@ Windows Task Scheduler task:
 
 ## Rollout plan
 
+All validation happens via the CLI (`main.py`) against the dev tree — same process as before. The tray app and packaging come *after* the logic is proven.
+
 ```
-Day 0  → python main.py --dry-run --days 7
-         Review logs/sweep-*.log. Confirm nothing "real" got matched.
+Phase 1 — validate core (CLI, source tree)
+  python main.py --dry-run --days 7    # review narrow dry-run
+  python main.py --days 7               # live narrow run; spot-check Calendar
+  python main.py --dry-run              # full 30-day dry-run
+  python main.py                        # full 30-day live run
 
-Day 0  → python main.py --days 7
-         Live run on a narrow window. Open Google Calendar, spot-check.
+Phase 2 — wrap in tray app (still running from source)
+  python -m calendar_reminder.tray      # smoke-test the tray UI
+                                        # exercise: Sweep now, Dry run, Open log, Open config, Quit
 
-Day 1  → python main.py --dry-run
-         Full 30-day dry run.
-
-Day 1  → python main.py
-         Full 30-day live run.
-
-Day 1  → Enable the scheduled task in Windows Task Scheduler.
+Phase 3 — package and install
+  pyinstaller CalendarReminder.spec     # build dist\CalendarReminder.exe
+  Run dist\CalendarReminder.exe         # first-run dialog, Startup shortcut install
+  Log out, log back in                  # confirm tray auto-starts
 ```
 
-If the log shows a real meeting being silenced, add its title substring or the calendar ID to `never_silence` in `config.yaml` and re-run. No code changes needed.
+If the log shows a real meeting being silenced, add its title substring or the calendar ID to `never_silence` in `%APPDATA%\CalendarReminder\config.yaml` (edit via tray → "Open config") and re-run. No code changes or re-packaging needed — config is read on every sweep.
 
 ## Out of scope
 
 - Silencing based on event body/description content analysis.
 - Touching recurring-event masters (we only modify individual instances inside the scan window).
-- A GUI or web UI.
+- A full GUI window (tray only; no main window, no rule editor UI).
+- Auto-updater for the `.exe` (rebuild + redistribute manually when needed).
 - Cross-account support (single Google account only).
 - Any form of positive "meeting detection" heuristics — silence rules are the only logic.
+- Code signing the `.exe` (Windows SmartScreen may flag on first run; the user clicks through).

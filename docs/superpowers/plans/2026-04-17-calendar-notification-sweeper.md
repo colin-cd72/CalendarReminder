@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Python CLI that, when run daily, silences notifications on Gmail-extracted and Reclaim-created Google Calendar events while leaving real meetings untouched.
+**Goal:** Build a Windows tray app (packaged as a single `.exe`) that silences notifications on Gmail-extracted and Reclaim-created Google Calendar events daily, while leaving real meetings untouched.
 
-**Architecture:** Stateless CLI. Each run: authenticate via OAuth → fetch upcoming events → classify via YAML rules → patch `reminders` on matches → log → exit. Four modules: `classify` (pure, unit-tested), `config` (YAML load), `auth` (OAuth), `sweeper` (orchestration). CLI entry `main.py`. Scheduled daily via Windows Task Scheduler.
+**Architecture:** Core is a pure Python sweep (classify → patch reminders) driven by two entry points: a CLI (`main.py`) for dev/debug, and a tray app (`tray.py`) for the shipping product. The tray runs on login, owns a background timer (once every 24h), and exposes *Sweep now*, *Dry run*, *Open log*, *Open config*, *Quit* via a right-click menu. When packaged (PyInstaller one-file), config/credentials/token/logs live in `%APPDATA%\CalendarReminder\`.
 
-**Tech Stack:** Python 3.10+, `google-api-python-client`, `google-auth-oauthlib`, `PyYAML`, `pytest`.
+**Tech Stack:** Python 3.10+, `google-api-python-client`, `google-auth-oauthlib`, `PyYAML`, `pystray`, `Pillow`, `pytest`, PyInstaller (build-time only).
 
 ---
 
@@ -14,18 +14,24 @@
 
 | Path | Purpose |
 |---|---|
-| `requirements.txt` | pinned dependencies |
-| `config.yaml` | silence rules + never-silence allow-list + scan window |
+| `requirements.txt` | pinned dependencies (includes pystray, Pillow, pyinstaller) |
+| `config.yaml` | shipped template — silence rules, never-silence list, scan window |
+| `icon.ico` | generated at build time (not committed) for tray + exe icon |
+| `CalendarReminder.spec` | PyInstaller one-file recipe |
 | `calendar_reminder/__init__.py` | package marker (empty) |
+| `calendar_reminder/paths.py` | resolve runtime dirs (frozen vs dev) |
 | `calendar_reminder/config.py` | load + validate YAML config |
 | `calendar_reminder/classify.py` | pure classifier: `classify(event, config)` |
 | `calendar_reminder/auth.py` | OAuth flow + token refresh, returns Calendar service |
 | `calendar_reminder/sweeper.py` | fetch events, apply classifier, patch reminders, emit log lines |
+| `calendar_reminder/tray.py` | pystray UI, internal daily timer, first-run dialog, state.json |
 | `main.py` | CLI entry: argparse flags, wires modules together |
 | `tests/__init__.py` | package marker (empty) |
 | `tests/test_classify.py` | unit tests for classifier |
 | `tests/test_config.py` | unit tests for config loader |
-| `logs/` | runtime log output (gitignored) |
+| `tests/test_paths.py` | unit tests for paths module |
+| `tests/test_sweeper.py` | unit tests for sweeper (fake service) |
+| `logs/` (dev) / `%APPDATA%\CalendarReminder\logs\` (packaged) | runtime log output |
 
 ---
 
@@ -43,7 +49,10 @@ google-api-python-client==2.149.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 PyYAML==6.0.2
+pystray==0.19.5
+Pillow==10.4.0
 pytest==8.3.3
+pyinstaller==6.11.0
 ```
 
 - [ ] **Step 2: Create empty `calendar_reminder/__init__.py`**
@@ -1186,54 +1195,615 @@ Expected: exit code 0. Visual spot-check in Calendar.
 
 ---
 
-## Task 16: Windows Task Scheduler registration
+## Task 16: `paths.py` — frozen vs dev runtime dirs (TDD)
 
-**Files:** none (external config).
+**Files:**
+- Create: `calendar_reminder/paths.py`
+- Create: `tests/test_paths.py`
+- Modify: `main.py` to use `paths.py` for log dir and default config
 
-- [ ] **Step 1: Open Task Scheduler**
+This is a refactor of the existing CLI's path handling. After this task, `main.py` gets its log dir and default config path from `paths.py`. `auth.py` is left alone — callers pass paths in.
 
-Start → "Task Scheduler" → Task Scheduler Library → right-click → Create Task… (not "Create Basic Task" — we need the richer form).
+- [ ] **Step 1: Write failing test**
 
-- [ ] **Step 2: General tab**
+Create `tests/test_paths.py`:
 
-- Name: `Calendar Reminder Sweep`
-- "Run whether user is logged on or not": checked
-- "Run with highest privileges": unchecked
+```python
+from unittest.mock import patch
 
-- [ ] **Step 3: Triggers tab**
+from calendar_reminder import paths
 
-Add trigger:
-- Daily
-- Start: tomorrow at 06:00
-- Recur every: 1 day
 
-- [ ] **Step 4: Actions tab**
+def test_dev_mode_uses_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(paths.sys, "frozen", False, create=True):
+        base = paths.app_data_dir()
+    assert base == tmp_path
 
-Add action:
-- Action: Start a program
-- Program/script: `D:\Calendar Reminder\.venv\Scripts\pythonw.exe`
-- Add arguments: `main.py`
-- Start in: `D:\Calendar Reminder`
 
-- [ ] **Step 5: Settings tab**
+def test_frozen_mode_uses_appdata(monkeypatch):
+    monkeypatch.setenv("APPDATA", "C:\\FakeAppData")
+    with patch.object(paths.sys, "frozen", True, create=True):
+        base = paths.app_data_dir()
+    assert str(base).replace("/", "\\") == "C:\\FakeAppData\\CalendarReminder"
 
-- "Allow task to be run on demand": checked
-- "Run task as soon as possible after a scheduled start is missed": checked
-- "If the task fails, restart every": 1 hour, up to 3 attempts
 
-- [ ] **Step 6: Save (will prompt for Windows password)**
+def test_config_path_under_app_data_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(paths.sys, "frozen", False, create=True):
+        p = paths.config_path()
+    assert p == tmp_path / "config.yaml"
 
-- [ ] **Step 7: Run-on-demand test**
 
-Right-click the task → Run. Wait a few seconds. Check `logs/sweep-YYYY-MM-DD.log` for a fresh run entry.
+def test_log_dir_under_app_data_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(paths.sys, "frozen", False, create=True):
+        p = paths.log_dir()
+    assert p == tmp_path / "logs"
+```
 
-- [ ] **Step 8: Commit any tweaks to config.yaml that came out of live runs**
+- [ ] **Step 2: Run — fails (module missing)**
+
+```bash
+pytest tests/test_paths.py -v
+```
+
+- [ ] **Step 3: Implement `paths.py`**
+
+Create `calendar_reminder/paths.py`:
+
+```python
+import os
+import sys
+from pathlib import Path
+
+
+def _is_frozen():
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_data_dir():
+    """Base directory for user-specific runtime data."""
+    if _is_frozen():
+        base = os.environ.get("APPDATA", "")
+        return Path(base) / "CalendarReminder"
+    return Path.cwd()
+
+
+def config_path():
+    return app_data_dir() / "config.yaml"
+
+
+def credentials_path():
+    return app_data_dir() / "credentials.json"
+
+
+def token_path():
+    return app_data_dir() / "token.json"
+
+
+def state_path():
+    return app_data_dir() / "state.json"
+
+
+def log_dir():
+    return app_data_dir() / "logs"
+
+
+def ensure_app_data_dir():
+    app_data_dir().mkdir(parents=True, exist_ok=True)
+    log_dir().mkdir(parents=True, exist_ok=True)
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+pytest tests/test_paths.py -v
+```
+
+Expected: 4 passed.
+
+- [ ] **Step 5: Update `main.py` to use `paths.py`**
+
+Replace the `log_dir = project_root / "logs"` line in `main.py` with a `paths.log_dir()` call, and update the default value of `--config` to read from `paths.config_path()` at runtime:
+
+In `main.py`, replace:
+
+```python
+project_root = Path(__file__).parent
+os.chdir(project_root)
+
+log_dir = project_root / "logs"
+_setup_logging(log_dir, args.verbose)
+```
+
+with:
+
+```python
+from calendar_reminder import paths
+paths.ensure_app_data_dir()
+_setup_logging(paths.log_dir(), args.verbose)
+```
+
+And change the `--config` default:
+
+```python
+parser.add_argument("--config", default=None, help="Path to config.yaml (default: app data dir).")
+```
+
+Then after parsing args:
+
+```python
+config_file = args.config or str(paths.config_path())
+```
+
+Pass `config_file` to `load_config()`.
+
+Remove the now-unused `project_root` and `os.chdir` lines (and the `os` and `Path` imports if no longer used).
+
+- [ ] **Step 6: Also update auth invocation in `main.py`**
+
+Replace `get_service()` with `get_service(credentials_path=str(paths.credentials_path()), token_path=str(paths.token_path()))`.
+
+- [ ] **Step 7: Run full test suite and `main.py --help`**
+
+```bash
+pytest -v
+python main.py --help
+```
+
+Expected: all tests pass; help text still sensible.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add calendar_reminder/paths.py tests/test_paths.py main.py
+git commit -m "feat(paths): add path resolver and wire CLI through it"
+```
+
+---
+
+## Task 17: Tray app (`tray.py`) — UI, timer, first-run dialog
+
+**Files:**
+- Create: `calendar_reminder/tray.py`
+
+This module is heavy I/O (icons, threads, tkinter dialog, OS commands). We won't unit-test it directly. We verify by running it and exercising the menu (Task 19).
+
+- [ ] **Step 1: Implement tray module**
+
+Create `calendar_reminder/tray.py`:
+
+```python
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from datetime import datetime, timezone
+from pathlib import Path
+from tkinter import messagebox
+
+import pystray
+from PIL import Image, ImageDraw
+
+from calendar_reminder import paths
+from calendar_reminder.auth import get_service
+from calendar_reminder.config import load_config
+from calendar_reminder.sweeper import sweep
+
+
+log = logging.getLogger("calendar_reminder")
+
+SWEEP_INTERVAL_SEC = 24 * 60 * 60
+TIMER_TICK_SEC = 60 * 60
+
+
+def _make_icon_image():
+    img = Image.new("RGB", (64, 64), "white")
+    d = ImageDraw.Draw(img)
+    d.ellipse((8, 8, 56, 56), fill="#2e7d32", outline="#1b5e20", width=2)
+    d.rectangle((28, 18, 36, 40), fill="white")
+    d.rectangle((28, 42, 36, 48), fill="white")
+    return img
+
+
+def _read_state():
+    p = paths.state_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_state(state):
+    paths.state_path().write_text(json.dumps(state), encoding="utf-8")
+
+
+def _setup_logging():
+    paths.ensure_app_data_dir()
+    log_path = paths.log_dir() / f"sweep-{datetime.now().strftime('%Y-%m-%d')}.log"
+    fmt = logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    file_h = logging.FileHandler(log_path, encoding="utf-8")
+    file_h.setFormatter(fmt)
+    logger = logging.getLogger("calendar_reminder")
+    logger.handlers.clear()
+    logger.addHandler(file_h)
+    logger.setLevel(logging.INFO)
+
+
+def _ensure_config_present():
+    """Copy shipped template to AppData on first run."""
+    target = paths.config_path()
+    if target.exists():
+        return
+    paths.ensure_app_data_dir()
+    # Shipped template location differs: source tree uses repo root; frozen exe uses sys._MEIPASS
+    if getattr(sys, "frozen", False):
+        src = Path(sys._MEIPASS) / "config.yaml"
+    else:
+        src = Path.cwd() / "config.yaml"
+    if src.exists():
+        shutil.copy(src, target)
+
+
+def _prompt_for_credentials():
+    """Blocking tkinter dialog. Returns True if user provided credentials.json."""
+    root = tk.Tk()
+    root.withdraw()
+    instructions = (
+        "Calendar Reminder needs OAuth credentials to access Google Calendar.\n\n"
+        "1. Open https://console.cloud.google.com/apis/credentials\n"
+        "2. Create a Desktop app OAuth client (or use an existing one)\n"
+        "3. Download the JSON and save it as:\n"
+        f"      {paths.credentials_path()}\n"
+        "4. Click OK when done."
+    )
+    while not paths.credentials_path().exists():
+        messagebox.showinfo("Calendar Reminder — First-run setup", instructions)
+        if not paths.credentials_path().exists():
+            if not messagebox.askretrycancel(
+                "credentials.json still missing",
+                f"Could not find {paths.credentials_path()}.\nRetry?",
+            ):
+                root.destroy()
+                return False
+    root.destroy()
+    return True
+
+
+def _install_startup_shortcut():
+    """Create a Windows Startup folder shortcut so the app auto-launches on login."""
+    if not getattr(sys, "frozen", False):
+        return  # dev mode: no shortcut
+    startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    lnk = startup / "CalendarReminder.lnk"
+    if lnk.exists():
+        return
+    target = sys.executable
+    ps = (
+        f"$s = (New-Object -COM WScript.Shell).CreateShortcut('{lnk}'); "
+        f"$s.TargetPath = '{target}'; "
+        f"$s.WorkingDirectory = '{Path(target).parent}'; "
+        f"$s.Save()"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        log.error("Failed to install startup shortcut: %s", e)
+
+
+class TrayApp:
+    def __init__(self):
+        self._icon = None
+        self._sweep_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._last_result = "No sweep yet this session"
+
+    def _run_sweep(self, dry_run):
+        if not self._sweep_lock.acquire(blocking=False):
+            self._icon.notify("A sweep is already running.", "Calendar Reminder")
+            return
+        try:
+            try:
+                cfg = load_config(str(paths.config_path()))
+                service = get_service(
+                    credentials_path=str(paths.credentials_path()),
+                    token_path=str(paths.token_path()),
+                )
+                counts = sweep(service, cfg, dry_run=dry_run)
+                suffix = " (dry-run)" if dry_run else ""
+                self._last_result = (
+                    f"Last: {datetime.now().strftime('%H:%M')} "
+                    f"silenced={counts['silenced']} kept={counts['kept']}{suffix}"
+                )
+                if not dry_run:
+                    _write_state({"last_sweep_at": datetime.now(timezone.utc).isoformat()})
+            except Exception as e:
+                log.exception("Sweep failed")
+                self._icon.notify(f"Sweep failed: {e}", "Calendar Reminder")
+                self._last_result = f"Last: {datetime.now().strftime('%H:%M')} ERROR"
+            finally:
+                if self._icon:
+                    self._icon.title = f"Calendar Reminder\n{self._last_result}"
+        finally:
+            self._sweep_lock.release()
+
+    def _on_sweep_now(self, icon, item):
+        threading.Thread(target=self._run_sweep, args=(False,), daemon=True).start()
+
+    def _on_dry_run(self, icon, item):
+        threading.Thread(target=self._run_sweep, args=(True,), daemon=True).start()
+
+    def _on_open_log(self, icon, item):
+        p = paths.log_dir() / f"sweep-{datetime.now().strftime('%Y-%m-%d')}.log"
+        if p.exists():
+            os.startfile(p)
+        else:
+            icon.notify("No log yet for today.", "Calendar Reminder")
+
+    def _on_open_config(self, icon, item):
+        p = paths.config_path()
+        if p.exists():
+            os.startfile(p)
+
+    def _on_quit(self, icon, item):
+        self._stop.set()
+        icon.stop()
+
+    def _timer_loop(self):
+        while not self._stop.wait(TIMER_TICK_SEC):
+            state = _read_state()
+            last = state.get("last_sweep_at")
+            due = True
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(last)
+                    age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    due = age >= SWEEP_INTERVAL_SEC
+                except ValueError:
+                    pass
+            if due:
+                self._run_sweep(dry_run=False)
+
+    def run(self):
+        _setup_logging()
+        _ensure_config_present()
+        if not paths.credentials_path().exists():
+            if not _prompt_for_credentials():
+                return
+        _install_startup_shortcut()
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Sweep now", self._on_sweep_now, default=True),
+            pystray.MenuItem("Sweep now (dry run)", self._on_dry_run),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open today's log", self._on_open_log),
+            pystray.MenuItem("Open config", self._on_open_config),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", self._on_quit),
+        )
+        self._icon = pystray.Icon(
+            "CalendarReminder",
+            _make_icon_image(),
+            f"Calendar Reminder\n{self._last_result}",
+            menu,
+        )
+        threading.Thread(target=self._timer_loop, daemon=True).start()
+        self._icon.run()
+
+
+def main():
+    TrayApp().run()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Verify imports**
+
+```bash
+python -c "from calendar_reminder import tray; print('ok')"
+```
+
+Expected: `ok`. If `pystray` or `Pillow` aren't installed, `pip install -r requirements.txt` and retry.
+
+- [ ] **Step 3: Run the tray app from source**
+
+```bash
+python -m calendar_reminder.tray
+```
+
+Expected: tray icon appears in the Windows system tray (bottom-right, may be hidden under the `^` arrow). Right-click it — you should see the five menu items plus separators.
+
+- [ ] **Step 4: Exercise the menu**
+
+- Click "Open config" → config.yaml opens in your editor. (In dev mode, this is `D:\Calendar Reminder\config.yaml`.)
+- Click "Open today's log" → if no log exists yet, you'll see a notification.
+- Click "Sweep now (dry run)" → wait a few seconds, balloon-tip or tooltip updates with last result.
+- Click "Quit" → tray icon disappears.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add calendar_reminder/tray.py
+git commit -m "feat(tray): system tray app with daily timer and first-run dialog"
+```
+
+---
+
+## Task 18: PyInstaller packaging
+
+**Files:**
+- Create: `CalendarReminder.spec`
+
+We use a hand-written spec (not the auto-generated one) so the recipe is explicit and diffable.
+
+- [ ] **Step 1: Create the spec**
+
+Create `CalendarReminder.spec` at the project root:
+
+```python
+# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller recipe for CalendarReminder tray app.
+
+from PyInstaller.utils.hooks import collect_submodules
+
+block_cipher = None
+
+a = Analysis(
+    ['calendar_reminder/tray.py'],
+    pathex=[],
+    binaries=[],
+    datas=[
+        ('config.yaml', '.'),
+    ],
+    hiddenimports=collect_submodules('pystray') + collect_submodules('PIL'),
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='CalendarReminder',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+```
+
+- [ ] **Step 2: Build the exe**
+
+```bash
+cd "D:\Calendar Reminder"
+.venv\Scripts\activate
+pyinstaller --clean CalendarReminder.spec
+```
+
+Expected: build succeeds, `dist\CalendarReminder.exe` created. Build will print warnings — only fail-stops matter.
+
+- [ ] **Step 3: Add build artifacts to `.gitignore`**
+
+Append to `.gitignore` if not already present:
+
+```
+build/
+dist/
+*.spec.bak
+```
+
+(Keep `CalendarReminder.spec` tracked — it's source.)
+
+```bash
+git add .gitignore CalendarReminder.spec
+git commit -m "feat(packaging): add PyInstaller spec for one-file exe"
+```
+
+---
+
+## Task 19: End-to-end: run the packaged exe, verify auto-start
+
+**Files:** none (execution + observation).
+
+- [ ] **Step 1: Move existing runtime files into AppData**
+
+Because the exe looks in `%APPDATA%\CalendarReminder\`, we need credentials there:
+
+```bash
+mkdir "%APPDATA%\CalendarReminder" 2>nul
+copy "D:\Calendar Reminder\credentials.json" "%APPDATA%\CalendarReminder\credentials.json"
+copy "D:\Calendar Reminder\token.json" "%APPDATA%\CalendarReminder\token.json"
+copy "D:\Calendar Reminder\config.yaml" "%APPDATA%\CalendarReminder\config.yaml"
+```
+
+(If you haven't done live CLI runs yet — i.e. `token.json` doesn't exist — skip the token copy. The exe will open the browser on first sweep.)
+
+- [ ] **Step 2: Run the exe manually**
+
+Double-click `D:\Calendar Reminder\dist\CalendarReminder.exe`.
+
+Expected: tray icon appears. If credentials are missing, the first-run dialog fires. Otherwise no dialog.
+
+- [ ] **Step 3: Exercise menu end-to-end**
+
+- "Sweep now (dry run)" → should run against the live calendar.
+- "Open today's log" → verifies log landed in `%APPDATA%\CalendarReminder\logs\`.
+- "Open config" → opens `%APPDATA%\CalendarReminder\config.yaml`.
+
+- [ ] **Step 4: Verify Startup shortcut was installed**
+
+Open File Explorer at:
+```
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+```
+
+Expected: `CalendarReminder.lnk` present. Right-click → Properties → Target points at `dist\CalendarReminder.exe`.
+
+- [ ] **Step 5: Reboot or log out / log in**
+
+After logging back in, the tray icon should appear automatically (within a few seconds of login).
+
+- [ ] **Step 6: Verify daily timer fires**
+
+Leave the tray running for >24h (or for a faster check: temporarily edit `SWEEP_INTERVAL_SEC` and `TIMER_TICK_SEC` in `tray.py` to small values, re-run from source with `python -m calendar_reminder.tray`, confirm it fires on the accelerated schedule, then revert).
+
+- [ ] **Step 7: Commit any tweaks that came out of live runs**
 
 ```bash
 git status
-git add config.yaml   # if it changed
-git commit -m "chore(config): tune silence rules after live validation"
+# add/commit any changes (config.yaml tweaks in the source template,
+# adjusted hiddenimports in the .spec, etc.)
 ```
+
+---
+
+## Task 20: Final cleanup and push
+
+- [ ] **Step 1: Full test suite green**
+
+```bash
+pytest -v
+```
+
+- [ ] **Step 2: Push to remote**
+
+```bash
+git push
+```
+
+- [ ] **Step 3: Confirm the user-facing artifact**
+
+`D:\Calendar Reminder\dist\CalendarReminder.exe` is the shippable app. It's already linked into Startup; it will auto-launch on next login and run the sweep within 24h.
 
 ---
 
@@ -1241,19 +1811,20 @@ git commit -m "chore(config): tune silence rules after live validation"
 
 **Spec coverage check:**
 - Problem + goal → addressed end-to-end.
-- Architecture/components (classify, config, auth, sweeper, main) → one task each, plus skeleton (Task 1), gitignore (Task 11), cloud setup (Task 12), verification (Tasks 13–15), scheduler (Task 16).
+- Core modules (classify, config, auth, sweeper, main) → Tasks 2–10, one task each, plus skeleton (Task 1), gitignore (Task 11), Cloud setup (Task 12), CLI validation (Tasks 13–15).
+- **Tray app design additions** → paths (Task 16), tray UI + timer + first-run dialog (Task 17), PyInstaller packaging (Task 18), packaged E2E + Startup shortcut verification (Task 19), final push (Task 20).
 - Classification rules: Tier 1 gmail (Task 2), Tier 1 reclaim organizer (Task 3), Tier 1 extendedProperties (Task 4), Tier 3 title regex (Task 5), never_silence (Task 6). ✓
-- Idempotency → covered by `_already_silenced` check in Task 9, verified in Task 14 Step 3.
-- Error handling (5xx/429 retry, token expiry, malformed event, malformed config) → retry logic in `_patch_silence`, per-event try/except in sweep loop, FileNotFoundError for missing credentials, ValueError for bad config.
-- Logging format matches spec. End-of-run SUMMARY matches spec.
+- Idempotency → covered by `_already_silenced` check in Task 9, verified in Task 14 Step 3 and Task 19.
+- Error handling (5xx/429 retry, token expiry, malformed event, malformed config) → retry logic in `_patch_silence`, per-event try/except in sweep loop, FileNotFoundError for missing credentials, ValueError for bad config. Tray wraps sweep in try/except and surfaces failures via balloon notification.
+- Logging format matches spec. End-of-run SUMMARY matches spec. Log directory path comes from `paths.log_dir()` so packaged + dev modes write to the correct location automatically.
 - OAuth scope limited to `calendar.events`. ✓
-- Scheduler config (6 AM daily, pythonw, run-whether-logged-on, missed-run catchup) → Task 16. ✓
-- Rollout plan (dry-run 7d → live 7d → dry-run 30d → live 30d → schedule) → Tasks 13 → 14 → 15 → 16. ✓
-- Tests (classify unit tests with fixtures, no live-API tests) → Tasks 2–6, plus sweeper test with fake service. ✓
+- Scheduling → in-app timer (24h interval, 1h tick) in Task 17; auto-start via Startup shortcut created by `_install_startup_shortcut()` in Task 17 and verified in Task 19.
+- Rollout (dry-run 7d → live 7d → dry-run 30d → live 30d → tray smoke-test → build → packaged E2E) → Tasks 13 → 14 → 15 → 17 (manual exercise) → 18 → 19.
+- Tests (classify/config/paths/sweeper unit tests with fixtures, no live-API tests) → Tasks 2–7, 9, 16.
 
 **Placeholder scan:** no TBD/TODO/"implement later". Every step that modifies code shows the actual code.
 
-**Type consistency:** `classify(event, config) -> (str, str|None)` used consistently; `sweep(service, config, dry_run=False, days_override=None)` used consistently. `_calendarId` injected in sweeper and referenced in classifier — consistent.
+**Type consistency:** `classify(event, config) -> (str, str|None)` used consistently; `sweep(service, config, dry_run=False, days_override=None)` used consistently; `paths.*()` helpers all return `Path`. Tray converts them to `str` only at API boundaries that require it (`get_service`, `load_config`). `_calendarId` injected in sweeper and referenced in classifier — consistent.
 
 ---
 
