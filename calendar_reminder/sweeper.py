@@ -60,6 +60,7 @@ def _patch_silence(service, calendar_id, event_id):
 def sweep(service, config, dry_run=False, days_override=None):
     """Run one sweep. Returns counts dict."""
     days = days_override if days_override is not None else config["scan"]["days_ahead"]
+    calendar_ids = config["scan"].get("calendars") or ["primary"]
     now = _now_utc()
     time_min = now.isoformat()
     time_max = (now + dt.timedelta(days=days)).isoformat()
@@ -67,12 +68,15 @@ def sweep(service, config, dry_run=False, days_override=None):
     counts = {"scanned": 0, "silenced": 0, "kept": 0, "skipped": 0, "errors": 0}
     start = time.monotonic()
 
-    events = _list_events(service, "primary", time_min, time_max)
+    events = []
+    for cal_id in calendar_ids:
+        events.extend(_list_events(service, cal_id, time_min, time_max))
 
     for ev in events:
         counts["scanned"] += 1
         summary = ev.get("summary", "")
         ev_id = ev.get("id", "?")
+        cal_id = ev.get("_calendarId", "primary")
         try:
             action, rule = classify(ev, config)
             if action == "silence":
@@ -84,7 +88,7 @@ def sweep(service, config, dry_run=False, days_override=None):
                     counts["silenced"] += 1
                     log.info('DRY-RUN-SILENCE | evt=%s | "%s" | rule=%s', ev_id, summary, rule)
                 else:
-                    _patch_silence(service, "primary", ev_id)
+                    _patch_silence(service, cal_id, ev_id)
                     counts["silenced"] += 1
                     log.info('SILENCED | evt=%s | "%s" | rule=%s', ev_id, summary, rule)
             else:
