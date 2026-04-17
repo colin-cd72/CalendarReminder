@@ -132,7 +132,7 @@ class TrayApp:
         self._stop = threading.Event()
         self._last_result = "No sweep yet this session"
 
-    def _run_sweep(self, dry_run):
+    def _run_sweep(self, dry_run, show_ui=False):
         if not self._sweep_lock.acquire(blocking=False):
             self._icon.notify("A sweep is already running.", "Calendar Reminder")
             return
@@ -143,7 +143,21 @@ class TrayApp:
                     credentials_path=str(paths.credentials_path()),
                     token_path=str(paths.token_path()),
                 )
-                counts = sweep(service, cfg, dry_run=dry_run)
+                if show_ui:
+                    from calendar_reminder.calendars import show_sweep_progress
+                    title = (
+                        "Calendar Reminder — Dry run"
+                        if dry_run
+                        else "Calendar Reminder — Sweep"
+                    )
+                    counts = show_sweep_progress(
+                        lambda: sweep(service, cfg, dry_run=dry_run),
+                        title=title,
+                    )
+                    if counts is None:
+                        return
+                else:
+                    counts = sweep(service, cfg, dry_run=dry_run)
                 suffix = " (dry-run)" if dry_run else ""
                 self._last_result = (
                     f"Last: {datetime.now().strftime('%H:%M')} "
@@ -162,10 +176,16 @@ class TrayApp:
             self._sweep_lock.release()
 
     def _on_sweep_now(self, icon, item):
-        threading.Thread(target=self._run_sweep, args=(False,), daemon=True).start()
+        threading.Thread(
+            target=self._run_sweep, args=(False,),
+            kwargs={"show_ui": True}, daemon=True,
+        ).start()
 
     def _on_dry_run(self, icon, item):
-        threading.Thread(target=self._run_sweep, args=(True,), daemon=True).start()
+        threading.Thread(
+            target=self._run_sweep, args=(True,),
+            kwargs={"show_ui": True}, daemon=True,
+        ).start()
 
     def _on_open_log(self, icon, item):
         p = paths.log_dir() / f"sweep-{datetime.now().strftime('%Y-%m-%d')}.log"
