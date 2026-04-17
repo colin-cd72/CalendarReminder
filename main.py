@@ -19,6 +19,11 @@ def _setup_logging(log_dir, verbose):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"sweep-{date.today().isoformat()}.log"
 
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
     fmt = logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S")
     file_h = logging.FileHandler(log_path, encoding="utf-8")
     file_h.setFormatter(fmt)

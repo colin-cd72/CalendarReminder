@@ -1,25 +1,30 @@
 silence_rules:
-  - name: gmail_auto_events
-    match:
-      eventType: fromGmail
-
-  - name: reclaim_by_organizer
-    match:
-      organizer_email_endswith: "@reclaim.ai"
-
-  - name: reclaim_by_extended_property
-    match:
-      has_extended_property_prefix: "reclaim"
-
-  - name: travel_title_patterns
-    match:
-      title_regex: "^(Travel Time|Travel to|Flight )"
-
+- name: gmail_auto_events
+  match:
+    eventType: fromGmail
+- name: focus_time_events
+  match:
+    eventType: focusTime
+- name: focus_time_by_title
+  match:
+    title_regex: ^Focus [Tt]ime$
+- name: reclaim_by_organizer
+  match:
+    organizer_email_endswith: '@reclaim.ai'
+- name: reclaim_by_extended_property
+  match:
+    has_extended_property_prefix: reclaim
+- name: travel_title_patterns
+  match:
+    title_regex: ^(Travel Time|Travel to|Flight |.+ Travel$)
 never_silence:
   title_contains: []
   calendar_ids: []
-
 scan:
   days_ahead: 30
   include_past: false
-  calendars: []    # list of calendar IDs to sweep; empty = prompt on first run
+  calendars:
+  - colin@fatbrain.tv
+  - 41r29mj1f6cmrml5ouit2r8qe8@group.calendar.google.com
+  - deford@gmail.com
+  - d1a440cca1a2d8ede8a912faf07058a59ba147d60bae9521210df7e36a3e718c@group.calendar.google.com
