@@ -49,3 +49,31 @@ def test_non_reclaim_organizer_is_kept():
     action, rule = classify(event, RECLAIM_ORG_CONFIG)
     assert action == "keep"
     assert rule is None
+
+
+EXT_PROP_CONFIG = {
+    "silence_rules": [
+        {"name": "reclaim_by_extended_property",
+         "match": {"has_extended_property_prefix": "reclaim"}},
+    ],
+    "never_silence": {"title_contains": [], "calendar_ids": []},
+}
+
+
+def test_extended_property_prefix_is_silenced():
+    event = {
+        "id": "e4",
+        "summary": "Habit: Daily walk",
+        "extendedProperties": {
+            "private": {"reclaim-event-category": "habit"}
+        },
+    }
+    action, rule = classify(event, EXT_PROP_CONFIG)
+    assert action == "silence"
+    assert rule == "reclaim_by_extended_property"
+
+
+def test_missing_extended_properties_is_kept():
+    event = {"id": "e5", "summary": "Lunch"}
+    action, rule = classify(event, EXT_PROP_CONFIG)
+    assert action == "keep"

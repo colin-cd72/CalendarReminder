@@ -11,4 +11,10 @@ def classify(event, config):
             if email.endswith(suffix):
                 return ("silence", rule["name"])
 
+        if "has_extended_property_prefix" in match:
+            prefix = match["has_extended_property_prefix"]
+            private = (event.get("extendedProperties") or {}).get("private") or {}
+            if any(k.startswith(prefix) for k in private.keys()):
+                return ("silence", rule["name"])
+
     return ("keep", None)
